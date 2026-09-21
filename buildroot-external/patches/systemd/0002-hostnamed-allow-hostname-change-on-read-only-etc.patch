@@ -1,53 +1,52 @@
-From e38f7d9c364f91bba09979c841b9e33dbeae686d Mon Sep 17 00:00:00 2001
-Message-Id: <e38f7d9c364f91bba09979c841b9e33dbeae686d.1635377266.git.stefan@agner.ch>
-In-Reply-To: <2214c1f039143caaf4ed99eb0f3fc4551b322148.1635377266.git.stefan@agner.ch>
-References: <2214c1f039143caaf4ed99eb0f3fc4551b322148.1635377266.git.stefan@agner.ch>
 From: Stefan Agner <stefan@agner.ch>
-Date: Wed, 27 Oct 2021 22:24:47 +0200
-Subject: [PATCH 2/2] hostnamed: allow hostname change on read-only /etc
+Subject: [PATCH] hostnamed: allow hostname change on read-only /etc
 
-The implementation of write_string_file_atomic_label() uses atomic write
-operation, which tries to create a file in /etc. Use regular file
-operation with sync flag to make sure the hostname is written to disk
-immediately.
+The implementation of write_string_file() with WRITE_STRING_FILE_ATOMIC
+creates a temporary file next to the target, which fails when /etc is
+read-only and only /etc/hostname is writable. Use a regular file write
+and fsync the file, since WRITE_STRING_FILE_SYNC also tries to sync the
+parent directory.
+
+Rebased for systemd 258: the write goes through etc_hostname() now, and
+the file descriptor open is checked before fsync().
 
 Signed-off-by: Stefan Agner <stefan@agner.ch>
 ---
- src/hostname/hostnamed.c | 10 +++++++++-
- 1 file changed, 9 insertions(+), 1 deletion(-)
+ src/hostname/hostnamed.c | 11 +++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
 
-diff --git a/src/hostname/hostnamed.c b/src/hostname/hostnamed.c
-index bd535ddc4d..0ec57eb2a7 100644
 --- a/src/hostname/hostnamed.c
 +++ b/src/hostname/hostnamed.c
-@@ -15,6 +15,7 @@
- #include "env-file-label.h"
+@@ -23,6 +23,7 @@
  #include "env-file.h"
  #include "env-util.h"
+ #include "extract-word.h"
 +#include "fd-util.h"
- #include "fileio-label.h"
  #include "fileio.h"
+ #include "hashmap.h"
  #include "hostname-setup.h"
-@@ -379,6 +380,7 @@ static void unset_statp(struct stat **p) {
+@@ -797,6 +798,7 @@
  
  static int context_write_data_static_hostname(Context *c) {
          _cleanup_(unset_statp) struct stat *s = NULL;
-+        _cleanup_close_ int fd = -1;
++        _cleanup_close_ int fd = -EBADF;
          int r;
  
          assert(c);
-@@ -395,10 +397,16 @@ static int context_write_data_static_hostname(Context *c) {
+@@ -813,10 +815,18 @@
                  return 0;
          }
  
--        r = write_string_file_atomic_label("/etc/hostname", c->data[PROP_STATIC_HOSTNAME]);
-+        r = write_string_file("/etc/hostname", c->data[PROP_STATIC_HOSTNAME],
+-        r = write_string_file(etc_hostname(), c->data[PROP_STATIC_HOSTNAME], WRITE_STRING_FILE_CREATE|WRITE_STRING_FILE_ATOMIC|WRITE_STRING_FILE_LABEL);
++        r = write_string_file(etc_hostname(), c->data[PROP_STATIC_HOSTNAME],
 +                              WRITE_STRING_FILE_CREATE | WRITE_STRING_FILE_TRUNCATE);
          if (r < 0)
                  return r;
  
 +        /* Cannot use WRITE_STRING_FILE_SYNC as it tries to sync parent dir */
-+        fd = open("/etc/hostname", O_RDONLY|O_CLOEXEC);
++        fd = open(etc_hostname(), O_RDONLY|O_CLOEXEC);
++        if (fd < 0)
++                return -errno;
 +        if (fsync(fd) < 0)
 +                return -errno;
 +
@@ -55,5 +54,4 @@ index bd535ddc4d..0ec57eb2a7 100644
          return 0;
  }
 -- 
-2.33.1
-
+2.51.0
